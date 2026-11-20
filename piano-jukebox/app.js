@@ -514,7 +514,8 @@ function wire() {
   initConverter({ el, icon, toast, addFiles,
     // for the piano check: what's playing, its MIDI, where we are in it, and the key-strength settings
     currentTrack: () => P.cur && engine.playing ? { name: P.cur.t, load: () => loadBuffer(P.cur), position: () => engine.position() } : null,
-    settings: () => ({ volume: settings.volume, floor: settings.floor }) });
+    settings: () => ({ volume: settings.volume, floor: settings.floor }),
+    seek: t => { if (P.cur) engine.seek(Math.max(0, t - 1)); } });   // jump to just before an issue
   $("fileInput").onchange = e => { addFiles([...e.target.files]); e.target.value = ""; };
   addEventListener("dragover", e => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); document.querySelector(".drop")?.classList.add("over"); } });
   addEventListener("dragleave", () => document.querySelector(".drop")?.classList.remove("over"));

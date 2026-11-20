@@ -26,6 +26,15 @@ and turn any recording into a piano MIDI file.
 3. Go to **My Music** -> **Convert a song to MIDI**, drop an mp3 (or record from the mic), and wait.
    The finished MIDI is added to My Music and saved in `song-to-midi/output/`.
 
+**Check how the real piano sounds**
+1. In **My Music**, turn on **Analyse mode** (in the converter panel) and put the laptop near the piano.
+2. Play a song from the jukebox. It records automatically and shows, live, how the song *should* sound
+   (from the original mp3) above what the mic hears.
+3. Pause or let the song end: it lines the recording up with the song and reports, with timestamps,
+   where the melody gets buried, stretches run late, soft notes lag, notes don't sound, or the piano
+   plays notes the song doesn't have. Click an issue to jump there. Reports are saved in
+   `song-to-midi/output/checks/`. Command line: `python song-to-midi/piano_check.py --midi <file.mid> --seconds 60`.
+
 ## Song → MIDI modes
 
 - **Auto** (default): splits the song into vocals / drums / bass / instruments, decides what to keep from what it hears, and cleans up the notes.

@@ -121,6 +121,19 @@ class Handler(SimpleHTTPRequestHandler):
         p = url.path
         if p == "/bridge/status":  # the jukebox checks for an optional piano helper; say "none here"
             return self.send_json({"piano": None})
+        if p == "/api/checks/latest":   # the most recent piano check report (to reopen it)
+            import piano_check
+            files = sorted(piano_check.CHECKS.glob("*.json"), key=lambda f: f.stat().st_mtime) if piano_check.CHECKS.exists() else []
+            if not files:
+                return self.send_json({"error": "no checks yet"}, 404)
+            r = json.loads(files[-1].read_text(encoding="utf-8"))
+            r["saved"] = str(files[-1].with_suffix(".txt"))
+            return self.send_json(r)
+        if p == "/api/reference":   # the original song's 88-key picture, for the live comparison view
+            import piano_check
+            q = {k: v[0] for k, v in parse_qs(url.query).items()}
+            r = piano_check.reference_for_browser(q.get("name", ""))
+            return self.send_json(r if r else {"error": "no reference for this song (convert it here first)"}, 200 if r else 404)
         if p == "/api/health":
             return self.send_json({"ok": True, "busy": sum(j["state"] in ("queued", "working") for j in jobs.values())})
         if p.startswith("/api/job/"):
