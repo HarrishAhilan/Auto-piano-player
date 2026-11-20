@@ -135,6 +135,83 @@ async function startRecording(nameInput) {
   mr.start(500); refresh();
 }
 
+// ------------------------------------------------------------ piano check
+// Record the real piano while a song plays, then have the converter find where it goes wrong.
+const chk = { on: false, start: 0, level: 0, timer: null, stop: null, busy: false, result: null, error: null };
+
+async function startCheck() {
+  const cur = D.currentTrack?.();
+  if (!cur) { D.toast("Play a song on the piano first, then start the check"); return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: {
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  } catch { D.toast("Couldn't use the microphone - check the browser's permission"); return; }
+  const mr = new MediaRecorder(stream), chunks = [];
+  mr.ondataavailable = e => e.data.size && chunks.push(e.data);
+  const actx = new AudioContext(), an = actx.createAnalyser(), buf = new Float32Array(2048);
+  an.fftSize = 2048; actx.createMediaStreamSource(stream).connect(an);
+  const pos = cur.position();                     // where in the song the recording starts (refined by the analysis)
+  Object.assign(chk, { on: true, start: Date.now(), level: 0, result: null, error: null });
+  chk.timer = setInterval(() => { an.getFloatTimeDomainData(buf); chk.level = Math.max(...buf.map(Math.abs)); refreshRec(); }, 100);
+  chk.stop = () => new Promise(res => { mr.onstop = res; mr.stop(); }).then(async () => {
+    clearInterval(chk.timer); stream.getTracks().forEach(t => t.stop()); actx.close();
+    chk.on = false;
+    if ((Date.now() - chk.start) / 1000 < 8) { chk.error = "Record at least 8 seconds of the piano."; refresh(); return; }
+    chk.busy = true; refresh();
+    try {
+      const [wav, midi] = await Promise.all([toWav(new Blob(chunks, { type: mr.mimeType })), cur.load()]);
+      const s = D.settings?.() || {};
+      const q = new URLSearchParams({ midi_len: midi.byteLength, pos: pos.toFixed(2), name: cur.name,
+        vol: s.volume ?? "", floor: s.floor ?? "" });
+      const r = await fetch(`${API}/api/check?${q}`, { method: "POST", body: new Blob([midi, wav]) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || `server error ${r.status}`);
+      chk.result = j;
+    } catch (e) {
+      chk.error = e instanceof TypeError ? "Couldn't reach the converter. Is Start Converter.bat running?" : e.message;
+    }
+    chk.busy = false; refresh();
+  });
+  mr.start(500); refresh();
+}
+
+function checkSection() {
+  const { el } = D;
+  const parts = [el("h3", { className: "cv-sub", textContent: "Check how your piano sounds" }),
+    el("p", { className: "note", textContent: "Play a song on the piano from the jukebox, put the laptop near the piano, and press Start check. Stop after 30-60 seconds (or longer). It lines the recording up with the song and lists, with timestamps, where the melody gets buried, notes come in late, or it stops sounding like the original." })];
+  const row = el("div", { className: "cv-row" });
+  if (chk.on) {
+    row.append(el("button", { className: "pill warn", onclick: () => chk.stop() }, "■ Stop and analyse"),
+      el("span", { className: "cv-rec-time", textContent: `${Math.floor((Date.now() - chk.start) / 1000)}s` }),
+      el("span", { className: "cv-meter" }, el("i")));
+  } else if (chk.busy) {
+    row.append(el("span", { className: "cv-job working" }, el("span", { textContent: "Analysing the recording..." })));
+  } else {
+    // (checked at click time, so it works even if a song was started after this panel was drawn)
+    row.append(el("button", { className: "pill", disabled: rec.on, onclick: startCheck }, "🎙 Start check"),
+      el("span", { className: "note", textContent: "Checks whichever song the jukebox is playing on the piano." }));
+  }
+  parts.push(row);
+  if (chk.error) parts.push(el("div", { className: "cv-off", textContent: chk.error }));
+  if (chk.result) {
+    const s = chk.result.summary, P = chk.result.problems;
+    const stat = (label, v, good) => v == null ? null : el("div", { className: "cv-stat" + (good ? " ok" : " bad") },
+      el("span", { textContent: label }), el("b", { textContent: v }));
+    parts.push(el("div", { className: "cv-report" },
+      !s.alignment_ok ? el("div", { className: "cv-off", textContent: "Couldn't confidently match the recording to the song - was the piano loud enough and playing this song?" }) : null,
+      el("div", { className: "cv-stats" },
+        stat("Melody over backing", s.melody_over_backing_db == null ? null : `${s.melody_over_backing_db > 0 ? "+" : ""}${s.melody_over_backing_db} dB`, s.melody_over_backing_db >= 6),
+        stat("Timing", s.timing_ms == null ? null : `${s.timing_ms > 0 ? "+" : ""}${s.timing_ms} ms`, Math.abs(s.timing_ms) <= 30),
+        stat("Notes on time", s.heard_on_time == null ? null : `${Math.round(s.heard_on_time * 100)}%`, s.heard_on_time >= 0.7),
+        stat("Like the original", s.sounds_like_song == null ? null : `${Math.round(s.sounds_like_song * 100)}%`, s.sounds_like_song >= 0.7)),
+      el("p", { className: "note", textContent: P.length ? `${P.length} of ${s.checked_sections} sections need work (recorded from ${s.starts_at}):` : `No problems found in ${s.checked_sections} sections (recorded from ${s.starts_at}).` }),
+      P.length ? el("ul", { className: "cv-problems" }, ...P.map(p => el("li", {}, el("b", { textContent: p.time }), " " + p.issues.join("; ")))) : null,
+      el("p", { className: "note", textContent: `Saved for Claude to read: ${chk.result.saved}` })));
+  }
+  return el("div", { className: "cv-check" }, ...parts);
+}
+
 // --------------------------------------------------------------------- UI
 let root = null, draftName = "";
 function refresh() { if (root?.isConnected) root.replaceChildren(...cardBody().filter(Boolean)); }
@@ -153,9 +230,10 @@ function jobRows() {
     j.url ? el("a", { className: "link", href: j.url, download: j.file || `${j.name}.mid`, textContent: "Download .mid" }) : null));
 }
 function refreshRec() {
+  const src = chk.on ? chk : rec;
   const t = root?.querySelector(".cv-rec-time"), m = root?.querySelector(".cv-meter i");
-  if (t) t.textContent = `${Math.floor((Date.now() - rec.start) / 1000)}s`;
-  if (m) m.style.width = `${Math.min(100, rec.level * 100)}%`;
+  if (t) t.textContent = `${Math.floor((Date.now() - src.start) / 1000)}s`;
+  if (m) m.style.width = `${Math.min(100, src.level * 100)}%`;
 }
 
 function cardBody() {
@@ -193,10 +271,11 @@ function cardBody() {
       nameInput,
       rec.on
         ? el("button", { className: "pill warn", onclick: () => rec.stop() }, "■ Stop recording")
-        : el("button", { className: "pill", onclick: () => startRecording(nameInput) }, "● Record from mic"),
+        : el("button", { className: "pill", disabled: chk.on, onclick: () => startRecording(nameInput) }, "● Record from mic"),
       rec.on ? el("span", { className: "cv-rec-time", textContent: `${Math.floor((Date.now() - rec.start) / 1000)}s` }) : null,
       rec.on ? el("span", { className: "cv-meter" }, el("i")) : null),
     el("div", { className: "cv-jobs" }, ...jobRows()),
+    checkSection(),
   ];
 }
 

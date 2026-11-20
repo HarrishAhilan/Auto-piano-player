@@ -511,7 +511,10 @@ function wire() {
   si.oninput = () => { clearTimeout(st); st = setTimeout(() => { query = si.value.trim(); render(); }, 150); };
   addEventListener("hashchange", () => { render(); $("mainScroll").scrollTop = 0; if (location.hash === "#/search") si.focus(); });
 
-  initConverter({ el, icon, toast, addFiles });
+  initConverter({ el, icon, toast, addFiles,
+    // for the piano check: what's playing, its MIDI, where we are in it, and the key-strength settings
+    currentTrack: () => P.cur && engine.playing ? { name: P.cur.t, load: () => loadBuffer(P.cur), position: () => engine.position() } : null,
+    settings: () => ({ volume: settings.volume, floor: settings.floor }) });
   $("fileInput").onchange = e => { addFiles([...e.target.files]); e.target.value = ""; };
   addEventListener("dragover", e => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); document.querySelector(".drop")?.classList.add("over"); } });
   addEventListener("dragleave", () => document.querySelector(".drop")?.classList.remove("over"));

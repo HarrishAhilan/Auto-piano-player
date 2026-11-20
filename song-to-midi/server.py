@@ -146,11 +146,60 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "not found"}, 404)
         return super().do_GET()
 
+    def read_body(self, limit):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if not 0 < length <= limit:
+            return None
+        chunks, left = [], length
+        while left:
+            c = self.rfile.read(min(left, 1 << 20))
+            if not c: return None
+            chunks.append(c); left -= len(c)
+        return b"".join(chunks)
+
+    def do_check(self, q):
+        """Piano check: body = MIDI bytes (midi_len of them) followed by a WAV recording of the piano."""
+        import io
+        import soundfile as sf
+        import piano_check
+        body = self.read_body(200 * 1024 * 1024)
+        if body is None:
+            return self.send_json({"error": "recording missing or too large"}, 400)
+        try:
+            n = int(q.get("midi_len", "0"))
+            midi, wav = body[:n], body[n:]
+            rec, rate = sf.read(io.BytesIO(wav), dtype="float32", always_2d=True)
+            rec = rec.mean(1)
+            if rate != piano_check.SR:
+                import librosa
+                rec = librosa.resample(rec, orig_sr=rate, target_sr=piano_check.SR)
+            if len(rec) < piano_check.SR * 5:
+                return self.send_json({"error": "recording too short - record at least 5 seconds"}, 400)
+            name = q.get("name", "song")[:120]
+            hint = float(q["pos"]) if q.get("pos") else None
+            vol = float(q["vol"]) if q.get("vol") else None
+            floor = int(q["floor"]) if q.get("floor") else None
+            print(f"[check] {name}: {len(rec) / piano_check.SR:.0f}s recording", flush=True)
+            r = piano_check.analyse(rec, midi, name=name, hint=hint, ref_path=piano_check.ref_for(name), vol=vol, floor=floor)
+            base = piano_check.save(r, rec)
+            r["text"] = piano_check.text_report(r)
+            r["saved"] = str(base) + ".txt"
+            print(r["text"], flush=True)
+            return self.send_json(r)
+        except Exception as e:
+            traceback.print_exc()
+            return self.send_json({"error": f"check failed: {e}"}, 500)
+
     def do_POST(self):
         url = urlparse(self.path)
         origin = self.headers.get("Origin")
         if origin and not ALLOWED_ORIGIN.match(origin):
             return self.send_json({"error": "not allowed from this website"}, 403)
+        if url.path == "/api/check":
+            return self.do_check({k: v[0] for k, v in parse_qs(url.query).items()})
         if url.path != "/api/convert":
             return self.send_json({"error": "not found"}, 404)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}

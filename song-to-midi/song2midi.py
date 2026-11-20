@@ -292,6 +292,13 @@ def convert(audio, rate, mode, parts, midi_path, status=print, progress=True, on
 
     status(f"Mode: {MODE_NAMES[mode]}")
     desc = ""
+    try:   # remember what the original sounds like, so a later piano check can compare against it
+        import librosa
+        import piano_check
+        piano_check.save_reference(librosa.resample(np.asarray(audio.mean(0), dtype=np.float32), orig_sr=rate,
+                                                    target_sr=piano_check.SR), Path(midi_path).name)
+    except Exception as e:
+        status(f"(couldn't save the song reference for piano checks: {e})")
     if mode in ("pop", "auto"):
         mono, rate, desc = separate(audio, rate, "auto" if mode == "auto" else parts, status, progress, on_progress)
     else:
