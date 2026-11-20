@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piano Jukebox</title>
+<style>
+  :root {
+    --bg: #f6f4ef; --panel: #ffffff; --ink: #1f1d1a; --muted: #6d675e;
+    --line: #e3ded4; --accent: #2f5d50; --accent-ink: #ffffff;
+    --warn: #a2401f; --ok: #2f7a4d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161513; --panel: #201f1c; --ink: #ece8e1; --muted: #a39d93;
+      --line: #34322e; --accent: #7fb8a4; --accent-ink: #10201b;
+      --warn: #e58a68; --ok: #79c495;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--ink); }
+  header { position: sticky; top: 0; z-index: 2; background: var(--panel);
+           border-bottom: 1px solid var(--line); padding: 14px 20px; }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 18px; margin: 0 0 2px; letter-spacing: .2px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .now { margin-top: 10px; }
+  .now-title { font-weight: 600; min-width: 0; flex: 1 1 280px;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar { height: 4px; background: var(--line); border-radius: 2px;
+         margin-top: 8px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--accent);
+               transition: width .9s linear; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--panel);
+           color: var(--ink); border-radius: 6px; padding: 5px 11px; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); color: var(--accent-ink);
+                   border-color: var(--accent); }
+  button.danger { color: var(--warn); }
+  button.small { padding: 2px 8px; font-size: 13px; }
+  input, select { font: inherit; color: var(--ink); background: var(--panel);
+                  border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  input[type=search] { flex: 1 1 260px; }
+  label { color: var(--muted); font-size: 13px; display: flex; gap: 6px;
+          align-items: center; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         margin-right: 6px; background: var(--warn); }
+  .dot.ok { background: var(--ok); }
+  .error { color: var(--warn); font-size: 13px; margin-top: 6px; }
+  main { padding: 16px 20px 60px; }
+  .layout { display: grid; grid-template-columns: 1fr 280px; gap: 20px; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+           border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; cursor: pointer;
+       user-select: none; position: sticky; top: 0; background: var(--panel); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums;
+                   white-space: nowrap; }
+  td.acts { white-space: nowrap; text-align: right; }
+  tr:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  tr.playing td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .composer { color: var(--muted); }
+  .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line);
+         border-radius: 4px; padding: 0 5px; margin-left: 6px; }
+  .side { padding: 12px 14px; align-self: start; position: sticky; top: 150px; }
+  .side h2 { font-size: 14px; margin: 0 0 8px; }
+  .q { list-style: none; margin: 0; padding: 0; }
+  .q li { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0;
+          border-bottom: 1px solid var(--line); font-size: 13px; }
+  .q li span { flex: 1; min-width: 0; }
+  .empty { color: var(--muted); font-size: 13px; }
+  .count { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="row">
+      <div style="flex:1">
+        <h1>Piano Jukebox</h1>
+        <div class="sub" id="output"><span class="dot"></span>Checking piano connection…</div>
+      </div>
+      <label>Volume <input id="volume" type="range" min="0.3" max="1.5" step="0.05">
+        <span id="volumeVal"></span></label>
+      <label>Softest <input id="floor" type="number" min="1" max="127" style="width:64px"></label>
+    </div>
+    <div class="now row">
+      <div class="now-title" id="nowTitle">Nothing playing</div>
+      <span class="sub" id="nowTime"></span>
+      <button id="skip">Skip</button>
+      <button id="stop">Stop</button>
+      <button id="panic" class="danger" title="Release every key and pedal">Panic</button>
+    </div>
+    <div class="bar"><div id="progress"></div></div>
+    <div class="error" id="error"></div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap layout">
+    <section>
+      <div class="row" style="margin-bottom:10px">
+        <input type="search" id="search" placeholder="Search title or composer…" autofocus>
+        <select id="composer"><option value="">All composers</option></select>
+        <select id="source"><option value="">All sources</option></select>
+        <button id="random" class="primary">Play random</button>
+      </div>
+      <p class="count" id="count"></p>
+      <div class="panel">
+        <table>
+          <thead><tr>
+            <th data-sort="title">Title</th>
+            <th data-sort="composer">Composer</th>
+            <th data-sort="year" class="num">Year</th>
+            <th data-sort="duration" class="num">Length</th>
+            <th></th>
+          </tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <footer>
+        MAESTRO performances © Google LLC, CC BY-NC-SA 4.0 — recorded on Yamaha Disklaviers
+        at the International Piano-e-Competition. Put your own .mid files in
+        <b>library\my files</b> and reload the page.
+      </footer>
+    </section>
+    <aside class="panel side">
+      <h2>Up next</h2>
+      <ul class="q" id="queue"></ul>
+    </aside>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let library = [], status = {}, sortKey = "composer", sortDir = 1;
+
+const fmt = s => { s = Math.max(0, Math.round(s || 0));
+  const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${x}` : `${m}:${x}`; };
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  if (!r.ok) throw new Error((await r.json()).error || r.status);
+  return r.json();
+}
+
+function el(tag, props = {}, ...kids) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...kids); return e;
+}
+
+async function loadLibrary() {
+  library = await api("/api/library");
+  const fill = (sel, values, label) => {
+    const cur = sel.value;
+    sel.replaceChildren(el("option", {value: "", textContent: label}),
+      ...values.map(v => el("option", {value: v, textContent: v})));
+    sel.value = cur;
+  };
+  fill($("composer"), [...new Set(library.map(i => i.composer).filter(Boolean))].sort(), "All composers");
+  fill($("source"), [...new Set(library.map(i => i.source))], "All sources");
+  render();
+}
+
+function filtered() {
+  const q = $("search").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const c = $("composer").value, s = $("source").value;
+  return library.filter(i =>
+    (!c || i.composer === c) && (!s || i.source === s) &&
+    q.every(w => (i.title + " " + i.composer).toLowerCase().includes(w)));
+}
+
+function render() {
+  const items = filtered().sort((a, b) => {
+    const x = a[sortKey], y = b[sortKey];
+    const r = typeof x === "number" ? x - y : String(x).localeCompare(String(y));
+    return (r || a.title.localeCompare(b.title)) * sortDir;
+  });
+  $("count").textContent = `${items.length} of ${library.length} pieces`;
+  const playing = status.current && status.current.id;
+  $("rows").replaceChildren(...items.map(i => {
+    const tr = el("tr", {className: i.id === playing ? "playing" : ""},
+      el("td", {}, i.title, i.source !== "MAESTRO" ? el("span", {className: "tag", textContent: i.source}) : ""),
+      el("td", {className: "composer", textContent: i.composer}),
+      el("td", {className: "num", textContent: i.year}),
+      el("td", {className: "num", textContent: fmt(i.duration)}),
+      el("td", {className: "acts"},
+        el("button", {className: "small primary", textContent: "Play", onclick: () => act("/api/play", {id: i.id})}),
+        " ",
+        el("button", {className: "small", textContent: "+ Queue", title: "Add to Up next",
+                      onclick: () => act("/api/queue", {id: i.id})})));
+    return tr;
+  }));
+}
+
+async function act(path, body = {}) {
+  try { showStatus(await api(path, body)); }
+  catch (e) { $("error").textContent = e.message; }
+}
+
+function showStatus(st) {
+  const prevId = status.current && status.current.id;
+  status = Object.assign(status, st);
+  const cur = st.current;
+  $("nowTitle").textContent = cur ? `${cur.title}${cur.composer ? " — " + cur.composer : ""}` : "Nothing playing";
+  $("nowTime").textContent = cur ? `${fmt(st.elapsed)} / ${fmt(cur.duration)}` : "";
+  $("progress").style.width = cur && cur.duration ? Math.min(100, 100 * st.elapsed / cur.duration) + "%" : "0";
+  $("error").textContent = st.error || "";
+  $("queue").replaceChildren(...(st.queue.length ? st.queue.map((q, n) =>
+    el("li", {}, el("span", {textContent: `${q.title}${q.composer ? " — " + q.composer : ""}`}),
+      el("button", {className: "small", textContent: "✕", title: "Remove",
+                    onclick: () => act("/api/remove", {index: n})})))
+    : [el("li", {className: "empty", textContent: "Queue is empty. Use “+ Queue” to line up pieces."})]));
+  if (st.outputs) {
+    const piano = st.outputs.filter(n => !/wavetable|midi through/i.test(n));
+    $("output").replaceChildren(el("span", {className: "dot" + (piano.length ? " ok" : "")}),
+      piano.length ? `Connected: ${piano.join(", ")}`
+                   : "Piano not found — check the WIDI Jack is connected in Bluetooth settings");
+  }
+  if (document.activeElement !== $("volume")) { $("volume").value = st.volume; }
+  $("volumeVal").textContent = Number($("volume").value).toFixed(2);
+  if (document.activeElement !== $("floor")) { $("floor").value = st.floor; }
+  if (((cur && cur.id) || null) !== (prevId || null)) render();
+}
+
+async function poll() {
+  try { showStatus(await api("/api/status")); }
+  catch { $("output").replaceChildren(el("span", {className: "dot"}), "Server not running — start piano_web.py"); }
+}
+
+$("search").oninput = $("composer").onchange = $("source").onchange = render;
+document.querySelectorAll("th[data-sort]").forEach(th => th.onclick = () => {
+  sortDir = sortKey === th.dataset.sort ? -sortDir : 1; sortKey = th.dataset.sort; render(); });
+$("random").onclick = () => { const f = filtered();
+  if (f.length) act("/api/play", {id: f[Math.floor(Math.random() * f.length)].id}); };
+$("skip").onclick = () => act("/api/skip");
+$("stop").onclick = () => act("/api/stop");
+$("panic").onclick = () => act("/api/panic");
+$("volume").oninput = () => $("volumeVal").textContent = Number($("volume").value).toFixed(2);
+$("volume").onchange = () => act("/api/levels", {volume: Number($("volume").value)});
+$("floor").onchange = () => act("/api/levels", {floor: Number($("floor").value)});
+
+loadLibrary().then(poll);
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

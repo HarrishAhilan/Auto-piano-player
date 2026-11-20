@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Vercel project link (IDs - don't share)
+.vercel/
+
+# Your own audio and converted songs (copyrighted / personal)
+*.mp3
+*.m4a
+*.wav
+*.flac
+song-to-midi/output/
+
+# Empty personal folder
+my files/
