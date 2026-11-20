@@ -13,3 +13,6 @@ audioread
 standard-aifc
 standard-sunau
 mido
+# YouTube link -> MIDI (personal use)
+yt-dlp
+imageio-ffmpeg

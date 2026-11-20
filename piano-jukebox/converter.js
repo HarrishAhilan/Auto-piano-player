@@ -79,26 +79,51 @@ async function runJob(blob, name) {
     const q = new URLSearchParams({ mode: opts.mode, parts: opts.parts.join(","), name, filename: "audio.wav" });
     const j = await upload(`${API}/api/convert?${q}`, wav, f => { job.progress = f; refreshJobs(); });
     job.id = j.id; job.progress = null; job.eta = null;
-    for (;;) {
-      await new Promise(res => setTimeout(res, 1000));
-      const r = await fetch(`${API}/api/job/${job.id}`);
-      if (!r.ok) throw new Error("The converter was restarted and lost this song - please try again.");
-      const s = await r.json();
-      job.status = s.status || s.state; job.progress = s.progress ?? null; job.eta = s.eta ?? null; refreshJobs();
-      if (s.state === "error") throw new Error(s.status);
-      if (s.state === "done") { job.summary = s.summary; job.file = s.file; break; }
-    }
-    const mr = await fetch(`${API}/api/job/${job.id}/midi`);
-    if (!mr.ok) throw new Error("Couldn't download the finished MIDI - please try again.");
-    const mid = await mr.arrayBuffer();
-    job.url = URL.createObjectURL(new Blob([mid], { type: "audio/midi" }));
-    job.state = "done"; job.status = `Done - ${job.summary}. Added to My Music.`; refreshJobs();
-    await D.addFiles([new File([mid], job.file || `${name}.mid`, { type: "audio/midi" })]);
-  } catch (e) {
-    if (e instanceof TypeError) { online = false; e = new Error("Couldn't reach the converter. Is Start Converter.bat running?"); }
-    job.state = "error"; job.status = e.message; refresh();  // full refresh: may show "offline" banner
-    D.toast(`Couldn't convert ${name}`);
+    await finishJob(job, false);
+  } catch (e) { failJob(job, e); }
+}
+
+// wait for the converter, fetch the MIDI, add it to My Music (and optionally start playing it)
+async function finishJob(job, autoplay) {
+  for (;;) {
+    await new Promise(res => setTimeout(res, 1000));
+    const r = await fetch(`${API}/api/job/${job.id}`);
+    if (!r.ok) throw new Error("The converter was restarted and lost this song - please try again.");
+    const s = await r.json();
+    if (s.name && s.name !== "YouTube song") job.name = s.name;     // YouTube: the video's title
+    job.status = s.status || s.state; job.progress = s.progress ?? null; job.eta = s.eta ?? null; refreshJobs();
+    if (s.state === "error") throw new Error(s.status);
+    if (s.state === "done") { job.summary = s.summary; job.file = s.file; break; }
   }
+  const mr = await fetch(`${API}/api/job/${job.id}/midi`);
+  if (!mr.ok) throw new Error("Couldn't download the finished MIDI - please try again.");
+  const mid = await mr.arrayBuffer();
+  job.url = URL.createObjectURL(new Blob([mid], { type: "audio/midi" }));
+  const file = job.file || `${job.name}.mid`;
+  job.state = "done"; job.status = `Done - ${job.summary}. Added to My Music${autoplay ? " and playing" : ""}.`; refreshJobs();
+  await D.addFiles([new File([mid], file, { type: "audio/midi" })]);
+  if (autoplay) D.playMy?.(file);
+}
+function failJob(job, e) {
+  if (e instanceof TypeError) { online = false; e = new Error("Couldn't reach the converter. Is Start Converter.bat running?"); }
+  job.state = "error"; job.status = e.message; refresh();  // full refresh: may show "offline" banner
+  D.toast(`Couldn't convert ${job.name}`);
+}
+
+// YouTube link -> audio (downloaded by the converter) -> MIDI -> My Music -> plays
+const YT_RE = /^https?:\/\/(www\.|m\.|music\.)?(youtube\.com\/(watch\?|shorts\/|live\/|embed\/)|youtu\.be\/)/i;
+async function runYouTube(link) {
+  const job = { key: crypto.randomUUID(), name: "YouTube song", state: "working", status: "Sending the link to the converter..." };
+  jobs.unshift(job); refreshJobs();
+  try {
+    if (online === false && !(await checkServer())) throw new Error("The converter isn't running. Double-click Start Converter.bat in the song-to-midi folder.");
+    const q = new URLSearchParams({ url: link, mode: opts.mode, parts: opts.parts.join(",") });
+    const r = await fetch(`${API}/api/youtube?${q}`, { method: "POST" });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `server error ${r.status}`);
+    job.id = j.id;
+    await finishJob(job, true);
+  } catch (e) { failJob(job, e); }
 }
 
 export function convertFiles(files) {
@@ -340,7 +365,20 @@ function checkSection() {
 }
 
 // --------------------------------------------------------------------- UI
-let root = null, draftName = "";
+let root = null, draftName = "", draftLink = "";
+function youtubeRow() {
+  const { el } = D;
+  const go = () => {
+    const link = draftLink.trim();
+    if (!YT_RE.test(link)) { D.toast("Paste a YouTube video link, e.g. https://www.youtube.com/watch?v=..."); return; }
+    draftLink = ""; refresh(); runYouTube(link);
+    D.toast("Getting the song from YouTube - it'll play on the piano when it's ready");
+  };
+  const input = el("input", { className: "cv-name cv-yt", placeholder: "Paste a YouTube link (song → MIDI → plays)", value: draftLink,
+    oninput: e => { draftLink = e.target.value; }, onkeydown: e => { if (e.key === "Enter") go(); } });
+  return el("div", { className: "cv-row" }, el("span", { className: "cv-label", textContent: "YouTube" }), input,
+    el("button", { className: "pill primary", onclick: go }, "▶ Convert & play"));
+}
 function refresh() { if (root?.isConnected) root.replaceChildren(...cardBody().filter(Boolean)); }
 // Progress updates only redraw the job list, so typing in the name box isn't interrupted
 function refreshJobs() {
@@ -393,6 +431,7 @@ function cardBody() {
       auto: "Arranges the song for your player piano: the singer's tune, the real bass line and the band's keys part on a steady beat, choruses found and made bigger, fitted to your piano's calibration (piano_profile.json). Best for almost every song.",
       pop: "Removes the drums first, then turns the parts you pick into piano. Untick everything except Melody for a simple tune.",
       piano: "Best when the song is only piano. Everything it hears (singing, drums, guitar) becomes piano keys." }[opts.mode] }),
+    youtubeRow(),
     el("div", { className: "cv-row" },
       el("button", { className: "pill", onclick: () => file.click() }, icon("upload"), "Choose audio file"), file,
       nameInput,

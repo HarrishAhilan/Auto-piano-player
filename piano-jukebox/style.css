@@ -268,3 +268,4 @@ dialog ol { padding-left: 18px; margin: 0; }
 .cv-problems li { cursor: pointer; }
 .cv-problems li:hover { color: var(--accent); }
 .cv-problems em { color: var(--sub); font-style: normal; margin-right: 4px; }
+.cv-yt { flex: 1; min-width: 260px; }

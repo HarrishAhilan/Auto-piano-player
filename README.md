@@ -35,6 +35,10 @@ and turn any recording into a piano MIDI file.
    plays notes the song doesn't have. Click an issue to jump there. Reports are saved in
    `song-to-midi/output/checks/`. Command line: `python song-to-midi/piano_check.py --midi <file.mid> --seconds 60`.
 
+**YouTube link → MIDI → plays**: paste a YouTube video link in the converter panel and press
+**▶ Convert & play** - the converter fetches the audio (yt-dlp), arranges it (Auto mode) and the
+jukebox starts playing it on the piano. Single videos only, up to 15 minutes; for personal use.
+
 ## Song → MIDI modes
 
 - **Auto** (default): a full piano **arrangement** fitted to your player piano - the singer's tune, the real bass line and the band's keys part on a steady beat, choruses found automatically and made bigger, light breaks thinned, intro/outro kept as played. Everything in it was calibrated on a real piano: see [docs/CALIBRATION.md](docs/CALIBRATION.md) and [docs/calibration-runs.md](docs/calibration-runs.md). Your piano's numbers live in `song-to-midi/piano_profile.json`.
