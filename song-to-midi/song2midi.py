@@ -6,7 +6,9 @@
   python song2midi.py --seconds 60       record for a fixed time instead of waiting for Enter
 
 Modes
-  piano  (default) best for songs that are already mostly piano
+  auto   (default) a full piano arrangement fitted to your player piano (arranger.py,
+         piano_profile.json; see docs/CALIBRATION.md)
+  piano  best for songs that are already mostly piano
   pop    for pop / film songs: splits the song into vocals, drums, bass and
          "other" (keys, guitar, strings) with Demucs, throws the drums away,
          transcribes the rest and cleans up stray notes
@@ -228,6 +230,11 @@ def separate(audio, rate, parts, status=print, progress=True, on_progress=None):
                             split=True, overlap=0.25, progress=progress and not on_progress, callback=cb)[0]
     stems = (stems * std + mean).numpy()
     status(f"  split in {time.time() - t0:.0f}s")
+    if parts == "all":                                  # every part, 16 kHz mono (for the arranger)
+        out = {name: librosa.resample(stems[i].mean(0), orig_sr=sr, target_sr=SR).astype(np.float32)
+               for i, name in enumerate(model.sources)}
+        out["original"] = librosa.resample(wav.numpy().mean(0), orig_sr=sr, target_sr=SR).astype(np.float32)
+        return out, SR, ""
     if parts == "auto":
         parts, reason = auto_parts(analyse_stems(stems, list(model.sources), sr))
         if parts is None:
@@ -285,6 +292,37 @@ def output_path(name, mode):
     return path
 
 
+def arrange_song(audio, rate, midi_path, status=print, progress=True, on_progress=None):
+    """Auto mode: a full piano arrangement fitted to the player piano (see arranger.py, docs/CALIBRATION.md)."""
+    import json as _json
+    import arranger
+    stems, _, _ = separate(audio, rate, "all", status, progress,
+                           (lambda st, f: on_progress("split", f)) if on_progress else None)
+    # the band's keys/guitar part, as the piano model hears it
+    x = stems["other"] / (np.abs(stems["other"]).max() + 1e-9) * 0.9
+    x = np.concatenate([np.zeros(SR // 2, dtype=np.float32), x])
+    status("Transcribing the band's keys/guitar part...")
+    model = piano_model()
+    report = (lambda f: on_progress("transcribe", f * 0.85)) if on_progress else (lambda f: None)
+    with quiet(), transcribe_progress(report):
+        other = model.transcribe(x, None)
+    song = arranger.Song(stems, other["output_dict"], status=status)
+    if on_progress: on_progress("transcribe", 0.95)
+    lock = None
+    try:
+        import piano_check
+        lf = arranger.LOCKS / f"{piano_check.base_name(Path(midi_path).name)}.intro.json"
+        if lf.exists():
+            lock = _json.loads(lf.read_text(encoding="utf-8")); status(f"Using the locked intro ({lf.name})")
+    except Exception:
+        pass
+    notes, ped = arranger.arrange(song, arranger.Piano(), status=status, lock=lock)
+    arranger.write_midi(midi_path, notes, ped)
+    n_mel = sum(1 for n in notes if n["role"] == "melody")
+    return (f"{len(notes)} notes arranged for your piano ({n_mel} melody, {len(song.choruses)} choruses, "
+            f"{60 / song.bl:.0f} bpm)")
+
+
 def convert(audio, rate, mode, parts, midi_path, status=print, progress=True, on_progress=None):
     """audio: [channels, samples] float array. Writes midi_path, returns a summary string."""
     import librosa
@@ -299,7 +337,9 @@ def convert(audio, rate, mode, parts, midi_path, status=print, progress=True, on
                                                     target_sr=piano_check.SR), Path(midi_path).name)
     except Exception as e:
         status(f"(couldn't save the song reference for piano checks: {e})")
-    if mode in ("pop", "auto"):
+    if mode == "auto":
+        return arrange_song(audio, rate, midi_path, status, progress, on_progress)
+    if mode == "pop":
         mono, rate, desc = separate(audio, rate, "auto" if mode == "auto" else parts, status, progress, on_progress)
     else:
         mono = audio.mean(0)
@@ -332,7 +372,7 @@ def convert(audio, rate, mode, parts, midi_path, status=print, progress=True, on
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", nargs="?", help="audio file (mp3/wav/flac/...) - omit to record from the mic")
-    ap.add_argument("--mode", choices=("auto", "piano", "pop"), default="piano")
+    ap.add_argument("--mode", choices=("auto", "piano", "pop"), default="auto")
     ap.add_argument("--parts", default="vocals,other,bass",
                     help="pop mode: parts to turn into piano (vocals, other, bass, drums)")
     ap.add_argument("--seconds", type=float, help="record for this many seconds")

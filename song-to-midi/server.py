@@ -60,6 +60,11 @@ def worker():
 
         try:
             job["progress"] = 0
+            if job.get("youtube"):                      # YouTube link: fetch the audio first
+                import youtube
+                path, title, _ = youtube.download(job["youtube"], status=status,
+                                                  progress=lambda f: job.__setitem__("progress", round(0.03 * f, 4)))
+                job["name"] = title
             status("Loading audio...")
             audio, rate = song2midi.load_file(str(path))
             job["seconds"] = round(audio.shape[1] / rate)
@@ -70,12 +75,16 @@ def worker():
             job["midi"] = midi_path.read_bytes()
             job["file"] = midi_path.name
             job["state"] = "done"
+        except ValueError as e:                         # friendly problems (bad link, too long, ...)
+            job["state"], job["status"] = "error", str(e)
         except Exception as e:
             traceback.print_exc()
             job["state"], job["status"] = "error", f"Conversion failed: {e}"
         finally:
             try:
-                os.unlink(path)
+                if path:
+                    os.unlink(path)
+                    if job.get("youtube"): os.rmdir(os.path.dirname(path))
             except OSError:
                 pass
             for j in jobs.values():  # keep queue positions fresh
@@ -121,6 +130,19 @@ class Handler(SimpleHTTPRequestHandler):
         p = url.path
         if p == "/bridge/status":  # the jukebox checks for an optional piano helper; say "none here"
             return self.send_json({"piano": None})
+        if p == "/api/checks/latest":   # the most recent piano check report (to reopen it)
+            import piano_check
+            files = sorted(piano_check.CHECKS.glob("*.json"), key=lambda f: f.stat().st_mtime) if piano_check.CHECKS.exists() else []
+            if not files:
+                return self.send_json({"error": "no checks yet"}, 404)
+            r = json.loads(files[-1].read_text(encoding="utf-8"))
+            r["saved"] = str(files[-1].with_suffix(".txt"))
+            return self.send_json(r)
+        if p == "/api/reference":   # the original song's 88-key picture, for the live comparison view
+            import piano_check
+            q = {k: v[0] for k, v in parse_qs(url.query).items()}
+            r = piano_check.reference_for_browser(q.get("name", ""))
+            return self.send_json(r if r else {"error": "no reference for this song (convert it here first)"}, 200 if r else 404)
         if p == "/api/health":
             return self.send_json({"ok": True, "busy": sum(j["state"] in ("queued", "working") for j in jobs.values())})
         if p.startswith("/api/job/"):
@@ -200,6 +222,21 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "not allowed from this website"}, 403)
         if url.path == "/api/check":
             return self.do_check({k: v[0] for k, v in parse_qs(url.query).items()})
+        if url.path == "/api/youtube":
+            import youtube
+            q = {k: v[0] for k, v in parse_qs(url.query).items()}
+            link, mode = q.get("url", ""), q.get("mode", "auto")
+            if mode not in ("auto", "piano", "pop"):
+                return self.send_json({"error": "mode must be auto, piano or pop"}, 400)
+            if not youtube.video_id(link):
+                return self.send_json({"error": "That doesn't look like a YouTube video link."}, 400)
+            parts = [x for x in q.get("parts", "vocals,other,bass").split(",") if x in song2midi.PARTS] or ["vocals", "other"]
+            job_id = uuid.uuid4().hex[:12]
+            ahead = sum(j["state"] in ("queued", "working") for j in jobs.values())
+            jobs[job_id] = {"id": job_id, "name": "YouTube song", "mode": mode, "parts": parts, "state": "queued", "youtube": link,
+                            "status": f"Waiting ({ahead} ahead)..." if ahead else "Starting...", "added": time.time()}
+            work.put((job_id, None))
+            return self.send_json({"id": job_id})
         if url.path != "/api/convert":
             return self.send_json({"error": "not found"}, 404)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}

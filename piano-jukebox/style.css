@@ -258,3 +258,14 @@ dialog ol { padding-left: 18px; margin: 0; }
 .cv-problems { margin: 4px 0 8px; padding-left: 18px; font-size: 13px; color: var(--text); }
 .cv-problems li { margin: 3px 0; }
 .cv-problems b { color: var(--accent); margin-right: 6px; font-variant-numeric: tabular-nums; }
+.cv-live canvas, .cv-viz { width: 100%; image-rendering: pixelated; border-radius: 6px; background: #0b0b0b; display: block; }
+.cv-live canvas { height: 220px; }
+.cv-viz { height: 120px; cursor: pointer; margin-bottom: 6px; }
+.cv-viz-label { font-size: 12px; color: var(--sub); margin: 8px 0 3px; }
+.cv-viz-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.cv-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--sub); margin: 6px 0; }
+.cv-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.cv-problems li { cursor: pointer; }
+.cv-problems li:hover { color: var(--accent); }
+.cv-problems em { color: var(--sub); font-style: normal; margin-right: 4px; }
+.cv-yt { flex: 1; min-width: 260px; }
