@@ -13,6 +13,19 @@ and turn any recording into a piano MIDI file.
 | `song-to-midi/` | Song → piano MIDI converter (AI transcription + Demucs source separation). `Start Converter.bat` runs it on http://localhost:8770. |
 | `tools/` | Scripts that download the free song library and build `catalog.json`. |
 
+## Quick start
+
+**Play songs on the piano**
+1. Connect the piano (USB-MIDI or Bluetooth MIDI) to this PC.
+2. Double-click `Piano Jukebox.bat` (needs Python 3.11 + `pip install mido python-rtmidi`).
+3. Open http://localhost:8765, pick a song, and press play.
+
+**Convert a song to MIDI**
+1. One-time setup: see `song-to-midi/requirements.txt`.
+2. Double-click `song-to-midi/Start Converter.bat` - it opens the jukebox at http://localhost:8770.
+3. Go to **My Music** -> **Convert a song to MIDI**, drop an mp3 (or record from the mic), and wait.
+   The finished MIDI is added to My Music and saved in `song-to-midi/output/`.
+
 ## Song → MIDI modes
 
 - **Auto** (default): splits the song into vocals / drums / bass / instruments, decides what to keep from what it hears, and cleans up the notes.
