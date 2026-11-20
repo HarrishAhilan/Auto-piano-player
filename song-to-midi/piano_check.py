@@ -119,10 +119,250 @@ def roll_chroma(notes, ped, t0, n_frames):
 
 
 def note_energy(rec):
-    """Energy at each piano key over time (constant-Q, one bin per semitone, 10 ms grid)."""
+    """Energy at each piano key over time: constant-Q with 3 bins per semitone (so neighbouring keys
+    don't blur together), 10 ms grid, taking the strongest bin around each key's exact pitch."""
     import librosa
-    C = np.abs(librosa.cqt(rec, sr=SR, hop_length=HOP, fmin=librosa.midi_to_hz(21), n_bins=88, bins_per_octave=12))
-    return C ** 2                                         # [88 keys, frames]
+    C = np.abs(librosa.cqt(rec, sr=SR, hop_length=HOP, fmin=librosa.midi_to_hz(21) / 2 ** (1 / 36),
+                           n_bins=88 * 3, bins_per_octave=36)) ** 2
+    return C.reshape(88, 3, -1).max(1)                    # [88 keys, frames]
+
+
+NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
+def key_name(p):
+    return f"{NOTE_NAMES[p % 12]}{p // 12 - 1}"
+
+
+def partial_energy(E):
+    """A key's evidence = its fundamental plus its first overtones (overtones are shorter-windowed in
+    the constant-Q transform, so they pin down WHEN a note starts much more precisely)."""
+    P = E.copy()
+    for k, w in ((12, 0.6), (19, 0.4), (24, 0.3), (28, 0.2)):
+        P[:-k] += w * E[k:]
+    return P
+
+
+T_HOP = 80                     # 5 ms grid for timing
+T_FFT = 1024
+
+
+def stft_mag(rec):
+    """Two spectrograms on a 5 ms grid: a short window (32 ms, sharp timing) for notes from C3 up,
+    and a longer one (64 ms, enough frequency detail) for the bass."""
+    import librosa
+    return {n: np.abs(librosa.stft(rec, n_fft=n, hop_length=T_HOP, center=True)) for n in (512, 1024)}
+
+
+def harmonic_bins(p, nfft, lo=150, hi=7000):
+    f0 = 440 * 2 ** ((p - 69) / 12); df = SR / nfft
+    B = 0.0004 if p < 60 else 0.0008                            # piano strings are slightly inharmonic
+    return {int(round(k * f0 * np.sqrt(1 + B * k * k) / df)) for k in range(1, 11) if lo <= k * f0 <= hi}
+
+
+def note_flux(S, p, others=()):
+    """How sharply this note's own harmonics jump, every 5 ms (spectral flux on just those bins).
+    Only harmonics NO other nearby note shares are used, so it's about THIS note."""
+    nfft = 512 if p >= 48 else 1024; X = S[nfft]
+    taken = set()
+    for q in others:
+        for b in harmonic_bins(q, nfft, 60, 7600): taken |= {b - 2, b - 1, b, b + 1, b + 2}
+    bins = sorted(b for b in harmonic_bins(p, nfft) if b not in taken)
+    rows = [b for b in bins if 0 <= b < X.shape[0]]
+    if len(rows) < 2: return None                                  # nothing unique to listen to
+    M = X[rows]
+    F = np.zeros_like(M); F[:, 2:] = np.maximum(0, M[:, 2:] - M[:, :-2])
+    return F, M                                                    # per-harmonic flux, per-harmonic level
+
+
+def leading_edge(w):
+    """Where a jump starts: first frame (with sub-frame interpolation) reaching half the peak."""
+    j = int(np.argmax(w)); e = j
+    while e > 0 and w[e - 1] >= 0.5 * w[j]: e -= 1
+    if e > 0:
+        return e - 1 + float(np.clip((0.5 * w[j] - w[e - 1]) / (w[e] - w[e - 1] + 1e-9), 0, 1)), w[j]
+    return float(e), w[j]
+
+
+def note_by_note(E, notes, ped, start, mel_ids, S=None, offset=0.0):
+    """Check every note that was sent: did that key sound (fine pitch analysis, wide window),
+    exactly when (5 ms harmonic flux), and how loud. `offset` = measured constant latency."""
+    L0 = 10 * np.log10(E + 1e-10); nf = L0.shape[1]            # each key's OWN pitch (no overtones)
+    res = []
+    starts = np.array([x["s"] for x in notes])
+    for idx, n in enumerate(notes):
+        k = n["p"] - 21
+        if not 0 <= k < 88: continue
+        t = n["s"] - start + offset
+        i0 = int(round(t * SR / HOP))
+        if i0 < 25 or i0 + 30 >= nf: continue
+        # other notes struck or still held around this one (their harmonics could be mistaken for it)
+        lo_i, hi_i = np.searchsorted(starts, n["s"] - 3.0), np.searchsorted(starts, n["s"] + 0.15)
+        near = [x["p"] for x in notes[lo_i:hi_i] if x is not n and x["s"] >= n["s"] - 0.15 or
+                (x is not n and x["s"] < n["s"] and sounding_until(x, ped) > n["s"] - 0.05)]
+        # is this key's own pitch an overtone of something else sounding? then presence is ambiguous
+        shadowed = any(n["p"] - q in (12, 19, 24, 28, 31, 36) for q in near)
+        # look only until this same key is struck again (so the next strike can't count for this one)
+        nxt = [x["s"] for x in notes[idx + 1: idx + 40] if x["p"] == n["p"] and x["s"] > n["s"] + 0.02]
+        span = int(min(0.25, (min(nxt) - n["s"]) if nxt else 0.25) * SR / HOP)
+        span = max(4, span)
+        before = float(np.median(L0[k, i0 - 20: i0 - 3]))         # 200..30 ms before
+        peak = float(L0[k, i0: i0 + span].max())
+        floor_db = float(np.percentile(L0[k], 20))
+        was_ringing = before > floor_db + 12                      # key already sounding (pedal / re-strike)
+        rise = peak - before
+        if rise >= 4.0 and not (shadowed and rise < 8.0): heard = True
+        elif was_ringing and rise <= -1.0: heard = False          # it was ringing and just faded: no new strike
+        elif was_ringing or shadowed: heard = None                # can't tell
+        else: heard = False
+        bass = n["p"] < 48
+        edge = t < 1.0 or t > nf * HOP / SR - 1.5                 # too close to the start/end of the recording
+        err_ms = None
+        FM = note_flux(S, n["p"], [q for q in near if q != n["p"]]) if S is not None else None
+        j0 = int(round(t * SR / T_HOP)); lo, hi = j0 - 16, j0 + 24              # -80 .. +120 ms
+        if FM is not None and lo > 30 and hi + 60 < FM[0].shape[1]:
+            F, M = FM
+            # presence from this note's UNIQUE harmonics (no other note can fake these)
+            span5 = max(4, span * HOP // T_HOP)
+            lv_b = 20 * np.log10(np.median(M[:, j0 - 40: j0 - 6], axis=1) + 1e-9)
+            lv_a = 20 * np.log10(M[:, j0: j0 + span5].max(1) + 1e-9)
+            urise = float(np.median(lv_a - lv_b))
+            if urise >= 6.0: heard = True
+            elif urise <= 1.0 and heard is not True: heard = False
+            elif urise <= 1.0 and rise < 8.0: heard = False                        # CQT rise came from a neighbour
+            if heard:
+                # time each unique harmonic separately; only trust it if they agree (within 15 ms)
+                bg = np.median(F[:, max(0, j0 - 200): j0 + 200], axis=1) + 1e-9
+                need = 3.0 if n["p"] >= 48 else 5.0
+                ests = []
+                for b in range(F.shape[0]):
+                    e, h = leading_edge(F[b, lo:hi])
+                    if h > need * bg[b]: ests.append(e)
+                if len(ests) >= 2:
+                    ests = np.array(ests); med_e = float(np.median(ests))
+                    close = ests[np.abs(ests - med_e) <= 3]
+                    if len(close) >= max(2, 0.6 * len(ests)):
+                        err_ms = (float(np.mean(close)) - 16) * T_HOP / SR * 1000
+        if heard is False and (bass or edge): heard = None       # bass pitches are too blurred in time to judge
+        res.append(dict(i=idx, s=n["s"], p=n["p"], v=n["v"], melody=idx in mel_ids, heard=heard,
+                        err_ms=None if err_ms is None else round(err_ms, 1), level_db=round(peak, 1), rise_db=round(rise, 1)))
+    # melody vs backing, note by note: is each tune note louder than the backing keys struck with it?
+    by_time = sorted(res, key=lambda r: r["s"])
+    for r in by_time:
+        if not r["melody"]: continue
+        rivals = [x for x in by_time if not x["melody"] and abs(x["s"] - r["s"]) <= 0.06]
+        if rivals:
+            top = max(rivals, key=lambda x: x["level_db"])
+            r["over_backing_db"] = round(r["level_db"] - top["level_db"], 1); r["rival"] = key_name(top["p"])
+    return res
+
+
+def section_timing(rec, notes, start, win=2.0, search_ms=120):
+    """How early/late each 2-second stretch runs compared with what was sent: line up that stretch's
+    strikes with the sent notes (cross-correlation over many notes -> precise to a few ms).
+    Also: do soft notes fire later than loud ones (player-piano solenoids often do)?"""
+    import librosa
+    env = librosa.onset.onset_strength(y=rec, sr=SR, hop_length=T_HOP, lag=1, max_size=3)
+    env = (env - np.median(env)) / (np.std(env) + 1e-9)
+    nf = len(env); out = []
+    k = np.exp(-np.arange(6) / 2.0)
+    span = int(search_ms / 1000 * SR / T_HOP)
+    end = start + nf * T_HOP / SR
+    # only whole stretches with room to slide (edges of the recording would bias the result)
+    for w0 in np.arange(start + search_ms / 1000 + 0.2, end - win - search_ms / 1000 - 0.2, win):
+        wn = [n for n in notes if w0 <= n["s"] < w0 + win]
+        if len(wn) < 6: continue
+        a = int((w0 - start) * SR / T_HOP); b = a + int(win * SR / T_HOP)
+        train = np.zeros(b - a + 2 * span)
+        for n in wn:
+            i = int(round((n["s"] - w0) * SR / T_HOP)) + span
+            if 0 <= i < len(train): train[i] += (n["v"] / 127) ** 1.5
+        train = np.convolve(train, k)[: len(train)]
+        scores = {}
+        for d in range(-span, span + 1):                          # try shifting the sent notes by d frames
+            s0 = a + d - span
+            if s0 < 0 or s0 + len(train) > nf: continue
+            scores[d] = float(np.dot(env[s0: s0 + len(train)], train))
+        if not scores: continue
+        best = max(scores, key=scores.get)
+        if abs(best) >= span - 1: continue                       # stuck at the search limit: not trustworthy
+        frac = 0.0                                                # parabola through the best shift
+        if best - 1 in scores and best + 1 in scores:
+            y0, y1, y2 = scores[best - 1], scores[best], scores[best + 1]
+            frac = float(np.clip(0.5 * (y0 - y2) / (y0 - 2 * y1 + y2 + 1e-9), -0.5, 0.5))
+        out.append(dict(t=round(float(w0), 2), offset_ms=round((best + frac) * T_HOP / SR * 1000, 1), notes=len(wn)))
+    if out:
+        med = np.median([o["offset_ms"] for o in out])
+        for o in out: o["drift_ms"] = round(o["offset_ms"] - med, 1)      # relative to the constant latency
+    return out
+
+
+def against_original(E, ref, start, dur):
+    """Pitch by pitch against the original song: which notes does the song have that the piano doesn't
+    (missing), and which does the piano play that the song doesn't (wrong/extra)? 100 ms grid, octave-folded."""
+    if ref is None or "cqt" not in ref: return [], None
+    hop = 0.1
+    nf = int(dur / hop)
+    # piano recording -> 12 pitch classes per 100 ms
+    step = int(hop * SR / HOP)
+    R = np.stack([E[:, i * step:(i + 1) * step].mean(1) for i in range(nf)], 1)     # [88, nf]
+    rc = np.zeros((12, nf))
+    for k in range(88): rc[(k + 21) % 12] += R[k]
+    # original (stored as dB on its own grid) -> same grid
+    G = 10 ** (ref["cqt"].astype(np.float32) / 10)                                   # [88, frames]
+    rh = ref["cqt_hop"]; oc = np.zeros((12, nf))
+    for i in range(nf):
+        a = int((start + i * hop) / rh); b = max(a + 1, int((start + (i + 1) * hop) / rh))
+        if b > G.shape[1]: break
+        g = G[:, a:b].mean(1)
+        for k in range(88): oc[(k + 21) % 12, i] += g[k]
+    import scipy.ndimage as ndi
+    norm = lambda X: ndi.median_filter(X / (X.max(0, keepdims=True) + 1e-12), size=(1, 3))
+    rn, on = norm(rc), norm(oc)
+    loud_o = oc.sum(0) > 0.02 * np.percentile(oc.sum(0), 95)
+    loud_r = rc.sum(0) > 0.02 * np.percentile(rc.sum(0), 95)
+    missing = (on >= 0.5) & (rn < 0.12) & loud_o & loud_r
+    extra = (rn >= 0.5) & (on < 0.12) & loud_o & loud_r
+    out = []
+    for kind, M in (("missing", missing), ("extra", extra)):
+        for pc in range(12):
+            row = M[pc]; i = 0
+            while i < nf:
+                if row[i]:
+                    j = i
+                    while j < nf and row[j]: j += 1
+                    if (j - i) * hop >= 0.3:                                      # at least 300 ms
+                        out.append(dict(kind=kind, pc=NOTE_NAMES[pc], t0=round(start + i * hop, 2),
+                                        t1=round(start + j * hop, 2)))
+                    i = j
+                else:
+                    i += 1
+    agree = float((np.minimum(rn, on).sum(0) / (np.maximum(rn, on).sum(0) + 1e-9))[loud_o & loud_r].mean()) \
+        if (loud_o & loud_r).any() else None
+    return sorted(out, key=lambda x: x["t0"]), agree
+
+
+def viz_payload(E, ref, notes, ped, start, dur, hop=0.04):
+    """Three aligned pictures (88 keys x time): how it should sound (original), what the piano played
+    (recording), and the notes that were sent - as 0..255 images for the browser."""
+    import base64
+    nf = int(dur / hop); step = hop * SR / HOP
+    def to_u8(dbs):
+        lo, hi = np.percentile(dbs, 50), np.percentile(dbs, 99.7)
+        return (np.clip((dbs - lo) / (hi - lo + 1e-9), 0, 1) * 255).astype(np.uint8)
+    H = np.stack([E[:, int(i * step): int((i + 1) * step) + 1].mean(1) for i in range(nf)], 1)
+    heard = to_u8(10 * np.log10(H + 1e-10))
+    sent = np.zeros((88, nf), np.uint8)
+    for n in notes:
+        a = int((n["s"] - start) / hop); b = int((sounding_until(n, ped) - start) / hop) + 1
+        k = n["p"] - 21
+        if 0 <= k < 88 and b > 0 and a < nf: sent[k, max(0, a):min(nf, b)] = max(60, n["v"] * 2)
+    exp = None
+    if ref is not None and "cqt" in ref:
+        rh = ref["cqt_hop"]; G = ref["cqt"].astype(np.float32)
+        cols = [G[:, min(G.shape[1] - 1, int((start + i * hop) / rh))] for i in range(nf)]
+        exp = to_u8(np.stack(cols, 1))
+    b64 = lambda X: base64.b64encode(np.ascontiguousarray(X.T).tobytes()).decode()   # row = one time step
+    return dict(hop=hop, frames=nf, keys=88, start=round(start, 3), heard=b64(heard), sent=b64(sent),
+                expected=b64(exp) if exp is not None else None)
 
 
 # ------------------------------------------------------------------------------ the check
@@ -137,9 +377,7 @@ def analyse(rec, midi, name="song", hint=None, ref_path=None, vol=None, floor=No
     mel = melody_line(seg, ped)
     E = note_energy(rec); nf = E.shape[1]
     C_rec = chroma(rec); C_sent = roll_chroma(seg, ped, start, C_rec.shape[1])
-    ref = None
-    if ref_path and Path(ref_path).exists():
-        d = np.load(ref_path); ref = dict(chroma=d["chroma"], hop=float(d["hop"]))
+    ref = load_ref(ref_path)
     windows = []
     for w0 in np.arange(start, start + dur - 1.0, WINDOW):
         w1 = min(w0 + WINDOW, start + dur)
@@ -206,6 +444,63 @@ def analyse(rec, midi, name="song", hint=None, ref_path=None, vol=None, floor=No
         if w["notes_per_sec"] > 14:
             why.append(f"very busy ({w['notes_per_sec']} notes/s) - may sound jumbled")
         if why: problems.append(dict(time=fmt(w["t"]), t=w["t"], issues=why))
+    # ------------------------------------------------ note-by-note (precise)
+    mel_ids = set()
+    for m in mel:
+        around = [x for x in seg if x is not m and abs(x["s"] - m["s"]) <= 0.06]
+        if not around or m["v"] >= max(x["v"] for x in around) + 10:
+            mel_ids.add(next(i for i, x in enumerate(seg) if x is m))
+    S = stft_mag(rec)
+    first = note_by_note(E, seg, ped, start, mel_ids, S)
+    errs0 = [r["err_ms"] for r in first if r["err_ms"] is not None]
+    latency_ms = float(np.median(errs0)) if errs0 else 0.0     # constant delay (MIDI -> hammer -> mic): not an error
+    nb = note_by_note(E, seg, ped, start, mel_ids, S, offset=latency_ms / 1000)
+    vs_orig, orig_agree = against_original(E, ref, start, dur)
+    sections = section_timing(rec, seg, start)
+    issues = []
+    for s_ in sections:
+        if abs(s_["drift_ms"]) > 20:
+            issues.append(dict(t=s_["t"], kind="timing (stretch)", text=f"this 2 s stretch runs {abs(s_['drift_ms']):.0f} ms "
+                               f"{'late' if s_['drift_ms'] > 0 else 'early'} compared with the rest ({s_['notes']} notes)"))
+    # do soft notes fire later than loud ones? (median timing of confidently-timed notes by velocity)
+    timed_v = [(r["v"], r["err_ms"]) for r in nb if r["err_ms"] is not None]
+    vel_lag = None
+    if len(timed_v) >= 20:
+        tv = np.array(timed_v); soft, loud = tv[tv[:, 0] < np.median(tv[:, 0])], tv[tv[:, 0] >= np.median(tv[:, 0])]
+        if len(soft) >= 8 and len(loud) >= 8:
+            vel_lag = round(float(np.median(soft[:, 1]) - np.median(loud[:, 1])), 1)
+    for r in nb:
+        nm, t = key_name(r["p"]), r["s"]
+        if r["heard"] is False:
+            issues.append(dict(t=round(t, 2), kind="not heard", text=f"{'melody ' if r['melody'] else ''}{nm} didn't sound (sent at velocity {r['v']})"))
+        # (single-note timing stays in the data/visual only: in dense chords it isn't reliable enough to list)
+        if r.get("over_backing_db") is not None and r["over_backing_db"] < 0:
+            issues.append(dict(t=round(t, 2), kind="melody buried",
+                               text=f"melody {nm} is {-r['over_backing_db']:.0f} dB quieter than the backing {r['rival']}"))
+    for x in vs_orig:
+        if x["kind"] == "missing":
+            issues.append(dict(t=x["t0"], kind="missing vs song", text=f"the song has {x['pc']} here ({x['t1'] - x['t0']:.1f}s) but the piano doesn't"))
+        else:
+            culprits = sorted({key_name(n["p"]) for n in seg if NOTE_NAMES[n["p"] % 12] == x["pc"]
+                               and n["s"] < x["t1"] and sounding_until(n, ped) > x["t0"]})
+            issues.append(dict(t=x["t0"], kind="wrong vs song", text=f"piano plays {x['pc']} ({x['t1'] - x['t0']:.1f}s) that the song doesn't have here"
+                               + (f" - sent {', '.join(culprits)}" if culprits else " (not sent: ringing/sympathetic)")))
+    issues.sort(key=lambda x: x["t"])
+    for x in issues: x["time"] = f"{int(x['t'] // 60)}:{x['t'] % 60:05.2f}"
+    heard_n = [r for r in nb if r["heard"]]
+    judged = [r for r in nb if r["heard"] is not None]
+    timed = [r for r in heard_n if r["err_ms"] is not None]
+    errs = np.array([abs(r["err_ms"]) for r in timed]) if timed else np.array([np.nan])
+    mel_r = [r for r in nb if r.get("over_backing_db") is not None]
+    precise = dict(notes_checked=len(nb), notes_heard=round(len(heard_n) / max(1, len(judged)), 3),
+                   notes_unclear=sum(1 for r in nb if r["heard"] is None), latency_ms=round(latency_ms, 1),
+                   soft_notes_lag_ms=vel_lag,
+                   stretch_timing_spread_ms=round(float(np.std([s_["drift_ms"] for s_ in sections])), 1) if sections else None,
+                   timing_median_ms=round(float(np.nanmedian(errs)), 1), timing_p90_ms=round(float(np.nanpercentile(errs, 90)), 1),
+                   melody_notes_on_top=round(sum(r["over_backing_db"] >= 0 for r in mel_r) / max(1, len(mel_r)), 3) if mel_r else None,
+                   pitch_agreement_with_song=None if orig_agree is None else round(orig_agree, 3))
+    viz = viz_payload(E, ref, seg, ped, start, dur)
+
     good = [w for w in windows if not w.get("silent")]
     summary = dict(
         song=name, recorded_seconds=round(dur, 1), starts_at=fmt(start), alignment_confidence=round(conf, 1),
@@ -213,8 +508,25 @@ def analyse(rec, midi, name="song", hint=None, ref_path=None, vol=None, floor=No
         melody_over_backing_db=med([w["melody_over_backing_db"] for w in good]),
         timing_ms=med([w["timing_ms"] for w in good]), heard_on_time=med([w["heard_on_time"] for w in good]),
         sounds_like_sent=med([w["sounds_like_sent"] for w in good]), sounds_like_song=med([w["sounds_like_song"] for w in good]),
-        jukebox_volume=vol, jukebox_softest=floor, problem_sections=len(problems), checked_sections=len(good))
-    return dict(summary=summary, problems=problems, windows=windows)
+        jukebox_volume=vol, jukebox_softest=floor, problem_sections=len(problems), checked_sections=len(good), **precise)
+    return dict(summary=summary, problems=problems, windows=windows, issues=issues, notes=nb, viz=viz, sections=sections)
+
+
+def load_ref(path):
+    if not path or not Path(path).exists(): return None
+    d = np.load(path)
+    ref = dict(chroma=d["chroma"], hop=float(d["hop"]))
+    if "cqt" in d: ref.update(cqt=d["cqt"], cqt_hop=float(d["cqt_hop"]))
+    return ref
+
+
+def cqt88_db(y, hop_s=0.02):
+    """The original's energy at each of the 88 keys (dB, float16) for the 'should sound like' picture."""
+    import librosa
+    hop = int(hop_s * SR)
+    C = np.abs(librosa.cqt(y, sr=SR, hop_length=hop, fmin=librosa.midi_to_hz(21) / 2 ** (1 / 36),
+                           n_bins=88 * 3, bins_per_octave=36)) ** 2
+    return (10 * np.log10(C.reshape(88, 3, -1).max(1) + 1e-10)).astype(np.float16)
 
 
 def med(xs):
@@ -250,6 +562,14 @@ def text_report(r):
     L.append(f"  {s['problem_sections']} of {s['checked_sections']} sections have problems:")
     for p in r["problems"]:
         L.append(f"    {p['time']}  " + "; ".join(p["issues"]))
+    if s.get("notes_checked"):
+        L.append(f"  Note by note: {s['notes_checked']} notes checked, {s['notes_heard']:.0%} sounded, timing median "
+                 f"{s['timing_median_ms']} ms (90% within {s['timing_p90_ms']} ms)"
+                 + (f", melody on top for {s['melody_notes_on_top']:.0%} of tune notes" if s.get("melody_notes_on_top") is not None else "")
+                 + (f", pitch agreement with the song {s['pitch_agreement_with_song']:.0%}" if s.get("pitch_agreement_with_song") is not None else ""))
+        L.append(f"  {len(r.get('issues', []))} precise issues:")
+        for x in r.get("issues", []):
+            L.append(f"    {x['time']}  [{x['kind']}] {x['text']}")
     return "\n".join(L)
 
 
@@ -268,7 +588,21 @@ def save(r, rec=None):
 def save_reference(original_audio_16k, name):
     """Called by the converter: remember what the original song sounds like, for later checks."""
     REFS.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(REFS / f"{base_name(name)}.npz", chroma=chroma(original_audio_16k).astype(np.float32), hop=1024 / SR)
+    np.savez_compressed(REFS / f"{base_name(name)}.npz", chroma=chroma(original_audio_16k).astype(np.float32), hop=1024 / SR,
+                        cqt=cqt88_db(original_audio_16k), cqt_hop=0.02)
+
+
+def reference_for_browser(name, hop=0.04):
+    """The whole song's 'should sound like' picture for the live view (88 keys x time, 0..255)."""
+    import base64
+    ref = load_ref(ref_for(name))
+    if ref is None or "cqt" not in ref: return None
+    G = ref["cqt"].astype(np.float32); step = max(1, int(round(hop / ref["cqt_hop"])))
+    n = G.shape[1] // step
+    G = G[:, : n * step].reshape(88, n, step).mean(2)
+    lo, hi = np.percentile(G, 50), np.percentile(G, 99.7)
+    u8 = (np.clip((G - lo) / (hi - lo + 1e-9), 0, 1) * 255).astype(np.uint8)
+    return dict(hop=round(ref["cqt_hop"] * step, 4), frames=n, keys=88, data=base64.b64encode(np.ascontiguousarray(u8.T).tobytes()).decode())
 
 
 def main():

@@ -136,33 +136,76 @@ async function startRecording(nameInput) {
 }
 
 // ------------------------------------------------------------ piano check
-// Record the real piano while a song plays, then have the converter find where it goes wrong.
-const chk = { on: false, start: 0, level: 0, timer: null, stop: null, busy: false, result: null, error: null };
+// Record the real piano while a song plays (by hand, or automatically in Analyse mode), show live
+// how it SHOULD sound (from the original mp3) next to what the mic hears, then analyse precisely.
+const chk = { on: false, start: 0, level: 0, timer: null, stop: null, busy: false, result: null, error: null,
+              song: null, live: null };
+const refCache = new Map();                        // song name -> { hop, frames, data: Uint8Array } | null
 
-async function startCheck() {
+async function loadReference(name) {
+  if (refCache.has(name)) return refCache.get(name);
+  let ref = null;
+  try {
+    const r = await fetch(`${API}/api/reference?${new URLSearchParams({ name })}`);
+    if (r.ok) { const j = await r.json(); ref = { hop: j.hop, frames: j.frames, data: Uint8Array.from(atob(j.data), c => c.charCodeAt(0)) }; }
+  } catch {}
+  refCache.set(name, ref); return ref;
+}
+
+// colour maps: "should sound" in blue, "piano heard" in amber, "notes sent" in grey
+const CMAP = {
+  expected: v => [20 + v * 0.25, 40 + v * 0.55, 60 + v * 0.75],
+  heard: v => [30 + v * 0.88, 20 + v * 0.62, 10 + v * 0.2],
+  sent: v => [v * 0.8, v * 0.8, v * 0.85],
+};
+
+async function startCheck(auto = false) {
   const cur = D.currentTrack?.();
-  if (!cur) { D.toast("Play a song on the piano first, then start the check"); return; }
+  if (!cur) { if (!auto) D.toast("Play a song on the piano first, then start the check"); return; }
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: {
       echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
-  } catch { D.toast("Couldn't use the microphone - check the browser's permission"); return; }
+  } catch { D.toast("Couldn't use the microphone - check the browser's permission"); opts.analyse = false; saveOpts(); refresh(); return; }
   const mr = new MediaRecorder(stream), chunks = [];
   mr.ondataavailable = e => e.data.size && chunks.push(e.data);
-  const actx = new AudioContext(), an = actx.createAnalyser(), buf = new Float32Array(2048);
-  an.fftSize = 2048; actx.createMediaStreamSource(stream).connect(an);
-  const pos = cur.position();                     // where in the song the recording starts (refined by the analysis)
-  Object.assign(chk, { on: true, start: Date.now(), level: 0, result: null, error: null });
-  chk.timer = setInterval(() => { an.getFloatTimeDomainData(buf); chk.level = Math.max(...buf.map(Math.abs)); refreshRec(); }, 100);
+  const actx = new AudioContext(), an = actx.createAnalyser();
+  an.fftSize = 8192; an.smoothingTimeConstant = 0.3;
+  actx.createMediaStreamSource(stream).connect(an);
+  const tbuf = new Float32Array(2048), fbuf = new Float32Array(an.frequencyBinCount);
+  // which FFT bins belong to each of the 88 keys (±half a semitone)
+  const binHz = actx.sampleRate / an.fftSize;
+  const keyBins = [...Array(88)].map((_, k) => {
+    const f = 440 * 2 ** ((k + 21 - 69) / 12);
+    return [Math.max(1, Math.floor(f * 2 ** (-1 / 24) / binHz)), Math.max(1, Math.ceil(f * 2 ** (1 / 24) / binHz))];
+  });
+  const pos0 = cur.position();
+  Object.assign(chk, { on: true, start: Date.now(), level: 0, result: null, error: null, song: cur.name });
+  chk.live = { ref: undefined, cols: [] };                       // undefined = still loading, null = none
+  loadReference(cur.name).then(r => { if (chk.live) chk.live.ref = r; });
+  chk.timer = setInterval(() => {
+    an.getFloatTimeDomainData(tbuf); chk.level = Math.max(...tbuf.map(Math.abs));
+    an.getFloatFrequencyData(fbuf);
+    const col = new Uint8Array(88);
+    for (let k = 0; k < 88; k++) {
+      let m = -140; const [a, b] = keyBins[k];
+      for (let i = a; i <= b && i < fbuf.length; i++) m = Math.max(m, fbuf[i]);
+      col[k] = Math.max(0, Math.min(255, (m + 95) * 4.5));
+    }
+    const live = chk.live; if (!live) return;
+    live.cols.push({ heard: col, pos: D.currentTrack?.()?.position() ?? null });
+    if (live.cols.length > 400) live.cols.shift();
+    refreshRec(); drawLive();
+  }, 40);
   chk.stop = () => new Promise(res => { mr.onstop = res; mr.stop(); }).then(async () => {
     clearInterval(chk.timer); stream.getTracks().forEach(t => t.stop()); actx.close();
-    chk.on = false;
+    chk.on = false; chk.live = null;
     if ((Date.now() - chk.start) / 1000 < 8) { chk.error = "Record at least 8 seconds of the piano."; refresh(); return; }
     chk.busy = true; refresh();
     try {
       const [wav, midi] = await Promise.all([toWav(new Blob(chunks, { type: mr.mimeType })), cur.load()]);
       const s = D.settings?.() || {};
-      const q = new URLSearchParams({ midi_len: midi.byteLength, pos: pos.toFixed(2), name: cur.name,
+      const q = new URLSearchParams({ midi_len: midi.byteLength, pos: pos0.toFixed(2), name: cur.name,
         vol: s.volume ?? "", floor: s.floor ?? "" });
       const r = await fetch(`${API}/api/check?${q}`, { method: "POST", body: new Blob([midi, wav]) });
       const j = await r.json();
@@ -176,37 +219,121 @@ async function startCheck() {
   mr.start(500); refresh();
 }
 
+async function showLastCheck() {
+  try {
+    const r = await fetch(`${API}/api/checks/latest`); const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `server error ${r.status}`);
+    chk.result = j; chk.error = null;
+  } catch (e) { chk.error = e instanceof TypeError ? "Couldn't reach the converter. Is Start Converter.bat running?" : e.message; }
+  refresh();
+}
+
+// Analyse mode: start recording the moment a song plays, stop + analyse when it pauses, ends or changes.
+setInterval(() => {
+  if (!D || !opts.analyse) return;
+  const cur = D.currentTrack?.();
+  if (chk.on && (!cur || cur.name !== chk.song)) chk.stop();
+  else if (!chk.on && !chk.busy && cur && !rec.on) startCheck(true);
+}, 250);
+
+// live view: two strips scrolling right-to-left, keys bottom (low) to top (high)
+function drawLive() {
+  const cv = root?.querySelector(".cv-live canvas"); const live = chk.live;
+  if (!cv || !live) return;
+  const g = cv.getContext("2d"), W = cv.width, H = 88, cols = live.cols, n = cols.length;
+  const img = g.createImageData(W, H * 2 + 6);
+  const put = (x, y, rgb) => { const o = (y * W + x) * 4; img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]; img.data[o + 3] = 255; };
+  for (let x = 0; x < W; x++) {
+    const c = cols[n - W + x]; if (!c) continue;
+    const ref = live.ref;
+    if (ref && c.pos != null) {
+      const fi = Math.round(c.pos / ref.hop);
+      if (fi >= 0 && fi < ref.frames) for (let k = 0; k < 88; k++) put(x, H - 1 - k, CMAP.expected(ref.data[fi * 88 + k]));
+    }
+    for (let k = 0; k < 88; k++) put(x, H + 6 + H - 1 - k, CMAP.heard(c.heard[k]));
+  }
+  g.putImageData(img, 0, 0);
+}
+
+// results: three aligned pictures + issue markers; click an issue to jump the jukebox there
+function drawResult(div, viz, issues) {
+  const panels = [["expected", "How the song should sound (from the mp3)"], ["heard", "What the piano played (mic)"], ["sent", "Notes sent to the piano"]];
+  const W = viz.frames, H = 88, dec = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  const colour = { "melody buried": "#ff7a59", "not heard": "#ff4d6d", "timing (stretch)": "#f5c542", "wrong vs song": "#c77dff", "missing vs song": "#4cc9f0" };
+  for (const [key, label] of panels) {
+    if (!viz[key]) continue;
+    const data = dec(viz[key]);
+    const cv = document.createElement("canvas"); cv.width = W; cv.height = H; cv.className = "cv-viz";
+    const g = cv.getContext("2d"), img = g.createImageData(W, H);
+    for (let x = 0; x < W; x++) for (let k = 0; k < 88; k++) {
+      const v = data[x * 88 + k], rgb = CMAP[key](v), o = ((H - 1 - k) * W + x) * 4;
+      img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]; img.data[o + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+    for (const is of issues) {                                     // issue markers on every panel
+      const x = Math.round((is.t - viz.start) / viz.hop);
+      if (x < 0 || x >= W) continue;
+      g.fillStyle = colour[is.kind] || "#fff";
+      g.globalAlpha = 0.22; g.fillRect(x, 0, 1, H);                 // faint line through the picture
+      g.globalAlpha = 1; g.fillRect(x, 0, Math.max(2, W / 300), 6);  // solid tick at the top
+    }
+    g.globalAlpha = 1;
+    cv.title = label;
+    cv.onclick = e => { const r = cv.getBoundingClientRect(); D.seek?.(viz.start + (e.clientX - r.left) / r.width * W * viz.hop); };
+    div.append(D.el("div", { className: "cv-viz-label", textContent: label }), cv);
+  }
+  const t0 = viz.start, t1 = viz.start + W * viz.hop, f = t => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+  div.append(D.el("div", { className: "cv-viz-axis" }, D.el("span", { textContent: f(t0) }), D.el("span", { textContent: f((t0 + t1) / 2) }), D.el("span", { textContent: f(t1) })));
+  div.append(D.el("div", { className: "cv-legend" }, ...Object.entries(colour).map(([k, c]) =>
+    D.el("span", {}, D.el("i", { style: { background: c } }), k))));
+}
+
 function checkSection() {
   const { el } = D;
   const parts = [el("h3", { className: "cv-sub", textContent: "Check how your piano sounds" }),
-    el("p", { className: "note", textContent: "Play a song on the piano from the jukebox, put the laptop near the piano, and press Start check. Stop after 30-60 seconds (or longer). It lines the recording up with the song and lists, with timestamps, where the melody gets buried, notes come in late, or it stops sounding like the original." })];
+    el("p", { className: "note", textContent: "Put the laptop near the piano. In Analyse mode it starts recording the moment you press play and analyses when you pause or the song ends. Top strip: how the song should sound (from the mp3). Bottom strip: what the mic hears." }),
+    el("label", { className: "cv-part" }, el("input", { type: "checkbox", checked: !!opts.analyse,
+      onchange: e => { opts.analyse = e.target.checked; saveOpts(); if (!opts.analyse && chk.on) chk.stop(); refresh(); } }),
+      "Analyse mode: record automatically whenever a song plays")];
   const row = el("div", { className: "cv-row" });
   if (chk.on) {
     row.append(el("button", { className: "pill warn", onclick: () => chk.stop() }, "■ Stop and analyse"),
       el("span", { className: "cv-rec-time", textContent: `${Math.floor((Date.now() - chk.start) / 1000)}s` }),
-      el("span", { className: "cv-meter" }, el("i")));
+      el("span", { className: "cv-meter" }, el("i")), el("span", { className: "note", textContent: `Recording: ${chk.song}` }));
+    parts.push(row, el("div", { className: "cv-live" },
+      el("div", { className: "cv-viz-label", textContent: "Should sound like (mp3)" + (chk.live?.ref === null ? " - not available for this song" : "") }),
+      el("canvas", { width: 400, height: 88 * 2 + 6 }),
+      el("div", { className: "cv-viz-label", textContent: "Piano (live mic) - lower half" })));
   } else if (chk.busy) {
-    row.append(el("span", { className: "cv-job working" }, el("span", { textContent: "Analysing the recording..." })));
+    row.append(el("span", { className: "cv-job working" }, el("span", { textContent: "Analysing the recording note by note..." })));
+    parts.push(row);
   } else {
-    // (checked at click time, so it works even if a song was started after this panel was drawn)
-    row.append(el("button", { className: "pill", disabled: rec.on, onclick: startCheck }, "🎙 Start check"),
-      el("span", { className: "note", textContent: "Checks whichever song the jukebox is playing on the piano." }));
+    row.append(el("button", { className: "pill", disabled: rec.on, onclick: () => startCheck(false) }, "🎙 Start check now"),
+      el("button", { className: "pill", onclick: showLastCheck }, "Show last check"),
+      el("span", { className: "note", textContent: "Uses whichever song the jukebox is playing." }));
+    parts.push(row);
   }
-  parts.push(row);
   if (chk.error) parts.push(el("div", { className: "cv-off", textContent: chk.error }));
   if (chk.result) {
-    const s = chk.result.summary, P = chk.result.problems;
+    const s = chk.result.summary, I = chk.result.issues || [];
     const stat = (label, v, good) => v == null ? null : el("div", { className: "cv-stat" + (good ? " ok" : " bad") },
       el("span", { textContent: label }), el("b", { textContent: v }));
+    const sign = v => `${v > 0 ? "+" : ""}${v}`;
+    const viz = el("div", { className: "cv-vizbox" });
+    if (chk.result.viz) drawResult(viz, chk.result.viz, I);
     parts.push(el("div", { className: "cv-report" },
       !s.alignment_ok ? el("div", { className: "cv-off", textContent: "Couldn't confidently match the recording to the song - was the piano loud enough and playing this song?" }) : null,
       el("div", { className: "cv-stats" },
-        stat("Melody over backing", s.melody_over_backing_db == null ? null : `${s.melody_over_backing_db > 0 ? "+" : ""}${s.melody_over_backing_db} dB`, s.melody_over_backing_db >= 6),
-        stat("Timing", s.timing_ms == null ? null : `${s.timing_ms > 0 ? "+" : ""}${s.timing_ms} ms`, Math.abs(s.timing_ms) <= 30),
-        stat("Notes on time", s.heard_on_time == null ? null : `${Math.round(s.heard_on_time * 100)}%`, s.heard_on_time >= 0.7),
-        stat("Like the original", s.sounds_like_song == null ? null : `${Math.round(s.sounds_like_song * 100)}%`, s.sounds_like_song >= 0.7)),
-      el("p", { className: "note", textContent: P.length ? `${P.length} of ${s.checked_sections} sections need work (recorded from ${s.starts_at}):` : `No problems found in ${s.checked_sections} sections (recorded from ${s.starts_at}).` }),
-      P.length ? el("ul", { className: "cv-problems" }, ...P.map(p => el("li", {}, el("b", { textContent: p.time }), " " + p.issues.join("; ")))) : null,
+        stat("Melody over backing", s.melody_over_backing_db == null ? null : `${sign(s.melody_over_backing_db)} dB`, s.melody_over_backing_db >= 6),
+        stat("Melody notes on top", s.melody_notes_on_top == null ? null : `${Math.round(s.melody_notes_on_top * 100)}%`, s.melody_notes_on_top >= 0.8),
+        stat("Timing steadiness", s.stretch_timing_spread_ms == null ? null : `±${s.stretch_timing_spread_ms} ms`, s.stretch_timing_spread_ms <= 15),
+        stat("Soft notes lag", s.soft_notes_lag_ms == null ? null : `${sign(s.soft_notes_lag_ms)} ms`, Math.abs(s.soft_notes_lag_ms) <= 15),
+        stat("Notes sounded", s.notes_heard == null ? null : `${Math.round(s.notes_heard * 100)}%`, s.notes_heard >= 0.9),
+        stat("Pitch match with song", s.pitch_agreement_with_song == null ? null : `${Math.round(s.pitch_agreement_with_song * 100)}%`, s.pitch_agreement_with_song >= 0.7)),
+      viz,
+      el("p", { className: "note", textContent: I.length ? `${I.length} precise issues (recorded from ${s.starts_at}; click one to jump there):` : `No problems found (recorded from ${s.starts_at}).` }),
+      I.length ? el("ul", { className: "cv-problems" }, ...I.slice(0, 200).map(x => el("li", { onclick: () => D.seek?.(x.t), title: "Jump the jukebox here" },
+        el("b", { textContent: x.time }), el("em", { textContent: `[${x.kind}] ` }), x.text))) : null,
       el("p", { className: "note", textContent: `Saved for Claude to read: ${chk.result.saved}` })));
   }
   return el("div", { className: "cv-check" }, ...parts);
