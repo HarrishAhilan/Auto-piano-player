@@ -99,6 +99,27 @@ def align(rec, notes, song_len, hint=None):
     return k * HOP / SR, conf
 
 
+def robust_align(rec, notes, song_len, hint=None):
+    """Line up 30 s pieces across the whole recording and take the consensus offset, so a repetitive
+    passage (e.g. an intro riff) can't pull the alignment a phrase off. Falls back to align()."""
+    dur = len(rec) / SR
+    if dur < 45:
+        return align(rec, notes, song_len, hint)
+    offs = []
+    for c0 in np.arange(0, dur - 30, 15):
+        a = int(c0 * SR)
+        s, conf = align(rec[a: a + 30 * SR], notes, song_len)
+        if conf >= 6: offs.append((s - c0, conf))
+    if len(offs) < 2:
+        return align(rec, notes, song_len, hint)
+    o = np.array([x[0] for x in offs]); med = float(np.median(o))
+    agree = np.abs(o - med) <= 0.1
+    if agree.sum() < max(2, 0.5 * len(o)):
+        return align(rec, notes, song_len, hint)
+    # each piece is aligned to 10 ms; the consensus can also be slightly negative (recording began first)
+    return float(np.median(o[agree])), float(np.mean([x[1] for x, ok in zip(offs, agree) if ok]))
+
+
 def chroma(y):
     import librosa
     c = librosa.feature.chroma_cqt(y=y, sr=SR, hop_length=1024)
@@ -371,7 +392,9 @@ def analyse(rec, midi, name="song", hint=None, ref_path=None, vol=None, floor=No
     notes, ped, song_len = read_midi(midi)
     rec = rec.astype(np.float32); rec = rec / (np.abs(rec).max() + 1e-9)
     dur = len(rec) / SR
-    start, conf = align(rec, notes, song_len, hint)
+    start, conf = robust_align(rec, notes, song_len, hint)
+    if start < 0:                                       # recording began before the song: drop that lead-in
+        rec = rec[int(round(-start * SR)):]; start = 0.0; dur = len(rec) / SR
     rec_on = librosa.onset.onset_detect(y=rec, sr=SR, hop_length=HOP, units="time", backtrack=False, delta=0.05) + start
     seg = [n for n in notes if start - 0.5 <= n["s"] < start + dur]
     mel = melody_line(seg, ped)

@@ -1,0 +1,53 @@
+{
+  "_about": "Calibration for the player piano this jukebox drives. Measured with the piano check (song-to-midi/piano_check.py) over 12 real recordings of 'Dancing in the Moonlight' (arranged v6..v18), 19 Nov 2026. See docs/CALIBRATION.md for how each number was found. Edit these if you change the jukebox settings or use a different piano.",
+
+  "jukebox_volume": 0.6,
+  "_jukebox_volume": "Jukebox Settings -> Volume. The jukebox plays velocity * volume. 0.35 left the melody only 9 velocity steps above the backing; 0.6 gives room (melody ~74 vs backing ~50).",
+  "jukebox_softest": 35,
+  "_jukebox_softest": "Jukebox Settings -> Softest note. Anything below this is raised to it.",
+
+  "levels": {
+    "_about": "Target loudness ON THE PIANO (after volume), not MIDI velocity. The arranger converts.",
+    "melody_verse": 73,
+    "melody_chorus": 75,
+    "melody_octave_double": 60,
+    "melody_light_break": 60,
+    "bass": 56,
+    "bass_chorus": 60,
+    "chords": 52,
+    "chords_chorus": 58,
+    "keys_part": 58,
+    "light_figure": 52,
+    "under_melody_cap": 52,
+    "minimum": 45,
+    "_minimum": "Notes below ~36 on the piano failed 22% of the time; 45+ is reliable."
+  },
+
+  "weak_keys": [48, 51, 53, 58, 60, 62, 63, 65],
+  "_weak_keys": "C3 Eb3 F3 Bb3 C4 D4 Eb4 F4: repeatedly didn't sound at 41-52. Eb4 (63) was the worst.",
+  "weak_key_minimum": 58,
+  "weak_key_overrides": {"63": 62, "62": 58},
+
+  "min_note_seconds": 0.15,
+  "_min_note_seconds": "Notes shorter than 0.06 s failed 10.7% of the time (vs ~2% for >= 0.15 s): the key lifts before the hammer lands.",
+  "key_reset_seconds": 0.12,
+  "_key_reset_seconds": "A key must be released this long before it is struck again. At 80 ms most failed repeats came exactly 79-80 ms after release.",
+  "merge_same_key_within": 0.2,
+  "melody_repeat_within": 0.15,
+
+  "soft_note_lag": [[45, 0.027], [60, 0.020]],
+  "_soft_note_lag": "Solenoids fire soft notes late. [played_velocity_up_to, seconds_to_send_early]. Measured: soft notes 13-14 ms late after a 13 ms correction (~27 ms total at <= 45); verified to land within 2 ms.",
+
+  "max_keys_ringing": 12,
+  "_max_keys_ringing": "Above ~13 keys ringing at once (pedal included) it sounds jumbled.",
+
+  "pedal": {
+    "change_at": ["melody_on", "melody_off", "bass_on"],
+    "min_press": 0.12,
+    "max_span": 4.0,
+    "_about": "Holding the pedal through chords (96% of the song) made every melody note ring ~2 s and overlap -> 'jumbled'. No pedal sounded dry. Changing at every tune note, tune note end and bass note keeps the tune clean and the backing warm."
+  },
+
+  "section_timing_correction": false,
+  "_section_timing_correction": "Do NOT pre-shift late-sounding sections: what looked like late stretches was the soft-note lag, and correcting both over-shot by 20-70 ms."
+}

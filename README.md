@@ -37,7 +37,7 @@ and turn any recording into a piano MIDI file.
 
 ## Song → MIDI modes
 
-- **Auto** (default): splits the song into vocals / drums / bass / instruments, decides what to keep from what it hears, and cleans up the notes.
+- **Auto** (default): a full piano **arrangement** fitted to your player piano - the singer's tune, the real bass line and the band's keys part on a steady beat, choruses found automatically and made bigger, light breaks thinned, intro/outro kept as played. Everything in it was calibrated on a real piano: see [docs/CALIBRATION.md](docs/CALIBRATION.md) and [docs/calibration-runs.md](docs/calibration-runs.md). Your piano's numbers live in `song-to-midi/piano_profile.json`.
 - **Piano recording**: transcribes the audio as-is. Best for solo piano.
 - **Pop / Film**: removes drums and lets you choose the parts.
 

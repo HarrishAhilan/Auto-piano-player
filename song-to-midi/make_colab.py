@@ -8,6 +8,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 code = (HERE / "song2midi.py").read_text(encoding="utf-8")
+files = {name: (HERE / name).read_text(encoding="utf-8") for name in ("arranger.py", "piano_check.py", "piano_profile.json")}
 
 
 def md(text):
@@ -39,7 +40,7 @@ Your song is only processed inside your own Colab session and is deleted when th
 import subprocess, sys, os, torch
 gpu = torch.cuda.is_available()
 print("GPU:", torch.cuda.get_device_name(0) if gpu else "NONE - turn it on: Runtime > Change runtime type > T4 GPU, then Run all again")
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "piano_transcription_inference", "demucs", "audioread", "mido"], check=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "piano_transcription_inference", "demucs", "audioread", "mido", "scipy"], check=True)
 ckpt_dir = os.path.expanduser("~/piano_transcription_inference_data")
 ckpt = os.path.join(ckpt_dir, "note_F1=0.9677_pedal_F1=0.9186.pth")
 if not os.path.exists(ckpt) or os.path.getsize(ckpt) < 1.6e8:
@@ -50,9 +51,10 @@ if not os.path.exists(ckpt) or os.path.getsize(ckpt) < 1.6e8:
 print("Ready.")
 """, title="1. Set up (takes ~1 minute)"),
     py("%%writefile song2midi.py\n" + code, title=None),
+    *[py(f"%%writefile {name}\n" + text, title=None) for name, text in files.items()],
     py("""
 mode = "auto"  #@param ["auto", "piano", "pop"]
-#@markdown **auto** - listens first and picks what to keep (recommended) ·
+#@markdown **auto** - arranges the song for your player piano (recommended; uses piano_profile.json) ·
 #@markdown **piano** - for songs that are only piano · **pop** - drums removed, you pick the parts below
 keep_melody = True  #@param {type:"boolean"}
 keep_chords = True  #@param {type:"boolean"}

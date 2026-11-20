@@ -390,7 +390,7 @@ function cardBody() {
     opts.mode === "pop" ? el("div", { className: "cv-row" }, el("span", { className: "cv-label", textContent: "Turn into piano" }),
       ...["vocals", "other", "bass"].map(partBox)) : null,
     el("p", { className: "note cv-hint", textContent: {
-      auto: "Listens to the song first and picks what to turn into piano: keeps the singing as the melody and the instruments as chords, drops the drums, and only keeps the bass when it's needed. Pure piano recordings are used as-is. It'll tell you what it picked.",
+      auto: "Arranges the song for your player piano: the singer's tune, the real bass line and the band's keys part on a steady beat, choruses found and made bigger, fitted to your piano's calibration (piano_profile.json). Best for almost every song.",
       pop: "Removes the drums first, then turns the parts you pick into piano. Untick everything except Melody for a simple tune.",
       piano: "Best when the song is only piano. Everything it hears (singing, drums, guitar) becomes piano keys." }[opts.mode] }),
     el("div", { className: "cv-row" },
