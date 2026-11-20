@@ -8,7 +8,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 code = (HERE / "song2midi.py").read_text(encoding="utf-8")
-files = {name: (HERE / name).read_text(encoding="utf-8") for name in ("arranger.py", "piano_check.py", "piano_profile.json")}
+files = {name: (HERE / name).read_text(encoding="utf-8") for name in ("arranger.py", "piano_check.py", "piano_profile.json", "youtube.py")}
 
 
 def md(text):
@@ -31,7 +31,8 @@ Turns any song into a MIDI file your player piano can play - in about a minute i
 
 **First time only:** menu **Runtime → Change runtime type → T4 GPU → Save**.
 
-**Then:** press **Runtime → Run all** (or Ctrl+F9). Step 3 shows an **upload button** - pick your mp3(s).
+**Then:** paste a **YouTube link** in step 2 (or leave it empty to upload mp3s) and press **Runtime → Run all** (Ctrl+F9).
+A 5-minute song takes about 2-3 minutes on the GPU.
 When each song is done, its `.mid` downloads automatically. Drag it into **Piano Jukebox → My Music**.
 
 Your song is only processed inside your own Colab session and is deleted when the session ends.
@@ -40,7 +41,7 @@ Your song is only processed inside your own Colab session and is deleted when th
 import subprocess, sys, os, torch
 gpu = torch.cuda.is_available()
 print("GPU:", torch.cuda.get_device_name(0) if gpu else "NONE - turn it on: Runtime > Change runtime type > T4 GPU, then Run all again")
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "piano_transcription_inference", "demucs", "audioread", "mido", "scipy"], check=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "piano_transcription_inference", "demucs", "audioread", "mido", "scipy", "yt-dlp", "imageio-ffmpeg"], check=True)
 ckpt_dir = os.path.expanduser("~/piano_transcription_inference_data")
 ckpt = os.path.join(ckpt_dir, "note_F1=0.9677_pedal_F1=0.9186.pth")
 if not os.path.exists(ckpt) or os.path.getsize(ckpt) < 1.6e8:
@@ -53,6 +54,8 @@ print("Ready.")
     py("%%writefile song2midi.py\n" + code, title=None),
     *[py(f"%%writefile {name}\n" + text, title=None) for name, text in files.items()],
     py("""
+youtube_link = ""  #@param {type:"string"}
+#@markdown Paste a YouTube video link above (personal use) - or leave it empty to upload mp3 files in step 3.
 mode = "auto"  #@param ["auto", "piano", "pop"]
 #@markdown **auto** - arranges the song for your player piano (recommended; uses piano_profile.json) ·
 #@markdown **piano** - for songs that are only piano · **pop** - drums removed, you pick the parts below
@@ -69,17 +72,27 @@ from google.colab import files
 import song2midi; importlib.reload(song2midi)
 song2midi.OUT = song2midi.Path("/content/output")
 
-uploaded = files.upload()
-for fname in uploaded:
+def convert_one(path, name):
     t0 = time.time()
-    print(f"\\n=== {fname} ===")
-    audio, rate = song2midi.load_file(fname)
-    midi_path = song2midi.output_path(song2midi.Path(fname).stem, mode)
+    print(f"\\n=== {name} ===")
+    audio, rate = song2midi.load_file(str(path))
+    midi_path = song2midi.output_path(name, mode)
     summary = song2midi.convert(audio, rate, mode, parts, midi_path, progress=False)
     print(f"Finished in {time.time() - t0:.0f}s: {summary}")
     files.download(str(midi_path))
-    os.remove(fname)
-""", title="3. Upload songs and convert"),
+
+if youtube_link.strip():
+    import youtube; importlib.reload(youtube)
+    wav, title, secs = youtube.download(youtube_link.strip())
+    print(f"Got '{title}' ({secs // 60}:{secs % 60:02d}) from YouTube")
+    convert_one(wav, title)
+    os.remove(wav)
+else:
+    uploaded = files.upload()
+    for fname in uploaded:
+        convert_one(fname, song2midi.Path(fname).stem)
+        os.remove(fname)
+""", title="3. Convert (YouTube link or upload)"),
 ]
 
 nb = {"cells": cells, "metadata": {"accelerator": "GPU", "colab": {"provenance": [], "gpuType": "T4"},
