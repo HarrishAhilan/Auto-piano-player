@@ -222,8 +222,9 @@ def separate(audio, rate, parts, status=print, progress=True, on_progress=None):
             if d.get("state") == "end":
                 done[0] += 1
                 on_progress("split", min(1.0, done[0] / total))
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     with torch.no_grad():
-        stems = apply_model(model, ((wav - mean) / std)[None], device="cpu",
+        stems = apply_model(model, ((wav - mean) / std)[None], device=device,
                             split=True, overlap=0.25, progress=progress and not on_progress, callback=cb)[0]
     stems = (stems * std + mean).numpy()
     status(f"  split in {time.time() - t0:.0f}s")
@@ -271,7 +272,7 @@ def clean_notes(notes, min_len=0.06, min_vel=20, max_poly=8):
 
 def output_path(name, mode):
     """A safe, unused file name in the output folder (never overwrites an earlier song)."""
-    OUT.mkdir(exist_ok=True)
+    OUT.mkdir(parents=True, exist_ok=True)
     safe = "".join(c for c in name if c not in '<>:"/\\|?*' and ord(c) >= 32).strip(" .") or "song"
     if safe.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(10)),
                                       *(f"LPT{i}" for i in range(10))}:
